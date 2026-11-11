@@ -1,0 +1,10 @@
+{
+  "name": "hermes-spaces",
+  "label": "Spaces",
+  "description": "Living, bot-owned artifacts you can ask questions of",
+  "icon": "LayoutDashboard",
+  "version": "0.1.0",
+  "tab": { "path": "/hermes-spaces", "hidden": true },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
