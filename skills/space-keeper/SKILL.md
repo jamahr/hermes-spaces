@@ -47,8 +47,10 @@ and render in a narrow panel beside the view.
    (or "nothing to do"). Say what you could not verify.
 4. Do not repair, restart, re-schedule, or change files outside the space
    unless the user explicitly asks in this chat. A message starting "I approve:" sent from
-   the space is that explicit ask, for exactly the fix it names: back up what you change,
-   apply it, verify it, report the result, and roll back if verification fails.
+   the space, or one marked "Approved by Andrew with the Approve button", is that explicit
+   ask, for exactly the fix it names: back up what you change, apply it, verify it, report
+   the result, and roll back if verification fails. Afterwards refresh the space's data and
+   brief so the page shows the new state.
 
 ## Writing `brief.json`
 
@@ -92,6 +94,8 @@ Brief rules (the view shows your decision and headline first; they are the most-
 - **Patterns, and shared causes, merge.** Failures with one root cause are ONE item. Read
   `latest.json.nights` for per-step results and `pipeline.changed_since_last_run` for fixes
   already made (say so; don't propose a fix that already landed).
+- **`approve` is run verbatim when he presses Approve** (no chat in between). Make it a complete,
+  self-contained instruction: what to do, where, how to verify, how to roll back, and what not to touch.
 - `items`: only what needs him, worst first, **at most 3**: `title`, `detail` (cause),
   `do`, `ask`, `fix` (propose-only question) and, when you have a concrete fix,
   `fix_summary`, `effort` and `approve` (the exact instruction he would give to apply it,

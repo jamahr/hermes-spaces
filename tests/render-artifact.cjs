@@ -33,9 +33,11 @@ const THEMES = {
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
       console.log(f, 'height', h, overflow ? 'HORIZONTAL OVERFLOW' : '');
       if (tname === 'light' && width === 1180) {
-        const n = await page.$$eval('[data-ask]', els => els.length);
-        await page.click('.cell.c-fail'); await page.click('.card .btn');
-        console.log('askable elements', n, 'sample asks', JSON.stringify(await page.evaluate(() => window.__asks)).slice(0, 400));
+        const n = await page.$$eval('[data-ask]', els => els.length), o = await page.$$eval('[data-open]', els => els.length);
+        await page.click('.cell.c-fail'); await page.waitForTimeout(250);
+        const opened = await page.evaluate(() => document.getElementById('sheet')?.classList.contains('on'));
+        await page.keyboard.press('Escape'); await page.waitForTimeout(250);
+        console.log('openable', o, 'askable', n, 'square opens details:', opened, 'asks sent by that click:', JSON.stringify(await page.evaluate(() => window.__asks)));
       }
       await page.close();
     }

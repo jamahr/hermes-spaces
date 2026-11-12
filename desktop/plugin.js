@@ -83,7 +83,7 @@ function themeCss() {
 // [data-ask] / [data-hermes-send] click routing.
 const BRIDGE = `(()=>{let last=0;function ask(p,c){p=String(p||'').trim();if(!p)return false;const n=Date.now();if(n-last<700)return false;last=n;parent.postMessage({type:'hermes-space-ask',prompt:p.slice(0,1500),context:String(c||'').slice(0,500)},'*');return true}
 function draft(p){parent.postMessage({type:'hermes-space-draft',prompt:String(p||'').slice(0,1500)},'*')}
-window.space={ask,draft,openChat:()=>parent.postMessage({type:'hermes-space-open'},'*')};window.hermes=window.hermes||{send:p=>Promise.resolve(ask(p)?{ok:true}:{ok:false,error:'throttled'})};
+window.space={ask,draft,openChat:()=>parent.postMessage({type:'hermes-space-open'},'*'),act:(index,key)=>parent.postMessage({type:'hermes-space-act',index:Number(index),key:String(key)},'*'),ready:()=>parent.postMessage({type:'hermes-space-ready'},'*')};window.hermes=window.hermes||{send:p=>Promise.resolve(ask(p)?{ok:true}:{ok:false,error:'throttled'})};
 document.addEventListener('click',e=>{const el=e.target.closest&&e.target.closest('[data-hermes-send],[data-ask]');if(el){e.preventDefault();e.stopPropagation();ask(el.getAttribute('data-hermes-send')||el.getAttribute('data-ask'),el.getAttribute('data-context')||'')}},true);})();`
 
 function b64(str) {
@@ -168,6 +168,31 @@ function SpacePage({ id }) {
   const [panel, setPanel] = useState(false)
   const [pending, setPending] = useState(null)
   const space = q.data?.space
+  const jobs = useQuery({
+    queryKey: [ID, 'jobs', id],
+    queryFn: () => rest(`/spaces/${enc(id)}/jobs?limit=30`),
+    refetchInterval: query => ((query?.state?.data?.running || []).length ? 2000 : 20000)
+  })
+  const jobsRef = useRef(null)
+  const postJobs = () => {
+    const w = frame.current && frame.current.contentWindow
+    if (w && jobsRef.current) w.postMessage({ type: 'hermes-space-jobs', jobs: jobsRef.current }, '*')
+  }
+  const prevStates = useRef({})
+  useEffect(() => {
+    const list = jobs.data?.jobs
+    if (!list) return
+    jobsRef.current = list
+    postJobs()
+    for (const jb of list) {
+      const was = prevStates.current[jb.id]
+      if (was && was !== jb.state && ['done', 'failed', 'needs_you'].includes(jb.state)) {
+        const first = String(jb.result || jb.error || '').split('\n')[0].slice(0, 160)
+        host.notify({ kind: jb.state === 'done' ? 'success' : 'warning', message: `${jb.fix || jb.title}: ${first}` })
+      }
+      prevStates.current[jb.id] = jb.state
+    }
+  }, [jobs.data])
 
   useEffect(() => { store.get(`panel:${id}`, true).then(v => setPanel(v !== false)) }, [id])
   const togglePanel = open => { setPanel(open); store.set(`panel:${id}`, open) }
@@ -186,6 +211,16 @@ function SpacePage({ id }) {
       if (d.type === 'hermes-space-ask') { togglePanel(true); setPending({ question: d.prompt, context: d.context || '', send: true, n: Date.now() }) }
       else if (d.type === 'hermes-space-draft') { togglePanel(true); setPending({ question: d.prompt, send: false, n: Date.now() }) }
       else if (d.type === 'hermes-space-open') togglePanel(true)
+      else if (d.type === 'hermes-space-ready') postJobs()
+      else if (d.type === 'hermes-space-act') {
+        rest(`/spaces/${enc(space.id)}/act`, { method: 'POST', body: { index: d.index, key: d.key } })
+          .then(() => qc.invalidateQueries({ queryKey: [ID, 'jobs', space.id] }))
+          .catch(e => {
+            host.notify({ kind: 'warning', message: `Couldn't start the fix: ${fail(e)}` })
+            const w = frame.current && frame.current.contentWindow
+            if (w) w.postMessage({ type: 'hermes-space-act-error', key: d.key, error: fail(e) }, '*')
+          })
+      }
     }
     window.addEventListener('message', onMsg)
     return () => window.removeEventListener('message', onMsg)

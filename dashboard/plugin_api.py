@@ -34,7 +34,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 PLUGIN_ID = "hermes-spaces"
-VERSION = "0.1.0"
+VERSION = "0.3.0"
 
 router = APIRouter()
 
@@ -422,6 +422,163 @@ async def list_asks(space_id: str, limit: int = Query(20, ge=1, le=100)):
     thread = _read_json(adir / "thread.json") if adir.is_dir() else None
     return {"asks": rows, "running": _running.get(space_id),
             "thread_session": (thread or {}).get("session_id") if isinstance(thread, dict) else None}
+
+
+# ---- approved actions --------------------------------------------------------
+#
+# An Approve button runs the exact fix the bot wrote in brief.json (items[i].approve),
+# as a background job on the space's bot: no chat. The page passes the item index and
+# a hash of the approve text it showed; a mismatch (the brief changed) is refused, so a
+# click can only ever approve what was on screen. Progress lands in jobs/<id>.json.
+
+JOB_TIMEOUT_S = 2 * 3600
+_jobs_running: dict = {}
+
+
+def fnv1a(text: str) -> str:
+    h = 0x811C9DC5
+    for b in text.encode("utf-8"):
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return f"{h:08x}"
+
+
+def _jobs_dir(base: Path) -> Path:
+    d = base / "jobs"
+    if d.is_symlink():
+        raise HTTPException(status_code=400, detail="jobs folder is a symlink")
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def _job_prompt(base: Path, meta: dict, item: dict) -> str:
+    return (
+        f"[{meta.get('title')} space] {item['approve']}\n\n"
+        f"(Approved by Andrew with the Approve button on the space page, for the item "
+        f"\"{item.get('title', '')}\". This is his explicit go-ahead for exactly this fix and nothing else. "
+        f"Follow the space-keeper approval rules: back up anything you change, apply it, verify it, and roll "
+        f"back if verification fails. Long steps: run them in the background and wait for them; don't stop early. "
+        f"If a step is blocked or needs his decision, stop and say so. Your reply shows on the card, so it "
+        f"must be: first line exactly one of DONE:, FAILED: or NEEDS YOU: followed by a plain result under 20 "
+        f"words; then at most 3 short bullets of evidence (what you ran, what you verified, what was left as it was). "
+        f"Before replying, update the space: run the space's collector if it has one, then rewrite brief.json "
+        f"(versioned, atomic) so this item shows its new state (drop it if resolved) and the decision reflects what's left. "
+        f"Space folder: {base}.)\n\nDigest:\n{_digest(base)}"
+    )
+
+
+def _run_job(base: Path, meta: dict, path: Path, record: dict, prompt: str) -> None:
+    import shutil as _sh
+    import subprocess
+    import threading
+
+    qfile = path.with_suffix(".prompt.txt")
+    qfile.write_text(prompt, encoding="utf-8")
+    exe = _sh.which("hermes") or "hermes"
+    cmd = [exe, "-p", meta["bot"], "chat", "--query-file", str(qfile), "--format", "stream-json", "-s", "space-keeper"]
+    text = ""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                cwd=str(base), env=dict(os.environ, HERMES_SPACE=base.name))
+        killer = threading.Timer(JOB_TIMEOUT_S, proc.kill)
+        killer.start()
+        record["state"] = "running"
+        _write_json(path, record)
+        for line in proc.stdout:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            t = ev.get("type")
+            if t == "text":
+                text += ev.get("text", "")
+            elif t == "tool_use":
+                record["steps"].append({"label": _step_label(ev.get("name", ""), ev.get("input")), "at": time.time()})
+                text = ""
+                _write_json(path, record)
+            elif t == "result":
+                if ev.get("text"):
+                    text = ev["text"]
+                record["session_id"] = ev.get("session_id")
+                if ev.get("error"):
+                    record["error"] = str(ev["error"])[:400]
+        proc.wait()
+        killer.cancel()
+        out = text.strip()
+        record["result"] = out
+        head = out.splitlines()[0].upper() if out else ""
+        if head.startswith("DONE"):
+            record["state"] = "done"
+        elif head.startswith("NEEDS YOU"):
+            record["state"] = "needs_you"
+        else:
+            record["state"] = "failed"
+            if not out:
+                record["error"] = record.get("error") or ("timed out" if proc.returncode and proc.returncode < 0 else f"exit {proc.returncode}")
+    except Exception as exc:  # noqa: BLE001
+        record["state"], record["error"] = "failed", str(exc)[:400]
+    finally:
+        record["finished_at"] = time.time()
+        _write_json(path, record)
+        try:
+            qfile.unlink()
+        except OSError:
+            pass
+        _jobs_running.pop(f"{base.name}:{record['key']}", None)
+
+
+class ActBody(BaseModel):
+    index: int = Field(..., ge=0, le=20)
+    key: str = Field(..., pattern=r"^[0-9a-f]{8}$")
+
+
+@router.post("/spaces/{space_id}/act")
+async def act(space_id: str, body: ActBody):
+    import secrets
+    import threading
+
+    base = _space_dir(space_id)
+    meta = _meta(base)
+    if not meta.get("bot") or not _ID_RE.fullmatch(str(meta["bot"])):
+        raise HTTPException(status_code=400, detail="space has no valid bot")
+    brief = _read_json(base / "brief.json") or {}
+    items = brief.get("items") if isinstance(brief, dict) else None
+    if not isinstance(items, list) or body.index >= len(items) or not isinstance(items[body.index], dict):
+        raise HTTPException(status_code=409, detail="that plan is no longer on the page; refresh")
+    item = items[body.index]
+    approve = str(item.get("approve") or "").strip()
+    if not approve or fnv1a(approve) != body.key:
+        raise HTTPException(status_code=409, detail="the plan changed since the page loaded; refresh and check it")
+    run_key = f"{space_id}:{body.key}"
+    if run_key in _jobs_running:
+        raise HTTPException(status_code=409, detail="this fix is already running")
+    jdir = _jobs_dir(base)
+    job_id = f"{int(time.time() * 1000)}-{secrets.token_hex(3)}"
+    record = {"id": job_id, "key": body.key, "title": item.get("title"), "fix": item.get("fix_summary"),
+              "approve": approve, "state": "queued", "steps": [], "result": "", "bot": meta["bot"],
+              "started_at": time.time()}
+    path = jdir / f"{job_id}.json"
+    _write_json(path, record)
+    _jobs_running[run_key] = job_id
+    threading.Thread(target=_run_job, args=(base, meta, path, record, _job_prompt(base, meta, item)), daemon=True).start()
+    return {"ok": True, "job": record}
+
+
+@router.get("/spaces/{space_id}/jobs")
+async def list_jobs(space_id: str, limit: int = Query(20, ge=1, le=100)):
+    base = _space_dir(space_id)
+    jdir = base / "jobs"
+    rows = []
+    if jdir.is_dir() and not jdir.is_symlink():
+        names = sorted(f.name for f in jdir.iterdir() if f.suffix == ".json" and _ASK_ID_RE.fullmatch(f.stem))
+        for n in names[-limit:]:
+            r = _read_json(jdir / n)
+            if isinstance(r, dict):
+                if r.get("state") in ("queued", "running") and f"{space_id}:{r.get('key')}" not in _jobs_running:
+                    r["state"], r["error"] = "failed", "interrupted (the server restarted while it ran)"
+                rows.append(r)
+    running = [k.split(":", 1)[1] for k in _jobs_running if k.startswith(space_id + ":")]
+    return {"jobs": rows, "running": running}
 
 
 @router.get("/spaces/{space_id}/versions")

@@ -7,8 +7,10 @@ Spaces are built to answer one decision, not to dump data. Each space opens with
 ## What you get
 
 - **Spaces** in the sidebar opens a hub. Each space opens a full page with its artifact and an **Ask panel** beside it.
-- **Click anything to ask.** Any element with `data-ask="…"` (or `space.ask(q)` in script) sends that question to the space's bot. The answer streams into the panel and lists what the bot checked: a bold verdict, a few bullets, then **Do:**. Answers run in a conversation dedicated to the space, so alerts in the bot's inbox stay clean. You can follow up, start a new thread, or open it as a full chat.
-- **Approve, safely.** `data-draft` / `space.draft(text)` puts an approval into the Ask box and nothing runs until you press Ask. The bundled skill limits an approval to exactly the fix it names, and the bot must back up, verify, and roll back if verification fails.
+- **Click anything to see its data, instantly.** `data-open="kind:args"` opens a details panel inside the page, with no chat and no waiting: the actual facts (filterable, searchable), pages, nights with each step's reason, backups, forecasts. Every panel ends with an optional **Ask** button for the deeper "why".
+- **Approve runs the fix.** `space.act(index, key)` runs the exact `approve` instruction from `brief.json` as a background job on the space's bot. There's an inline confirm and no chat. Progress and the result (`DONE` / `FAILED` / `NEEDS YOU` + evidence) appear on the card, and a toast fires when it finishes. The key is a hash of the instruction shown, so a click can only approve what was on screen. Jobs live in `jobs/`.
+- **Ask when you want judgment.** Any element with `data-ask="…"` (or `space.ask(q)` in script) sends that question to the space's bot. The answer streams into the panel and lists what the bot checked: a bold verdict, a few bullets, then **Do:**. Answers run in a conversation dedicated to the space, so alerts in the bot's inbox stay clean. You can follow up, start a new thread, or open it as a full chat.
+- **Draft into the Ask box.** `data-draft` / `space.draft(text)` pre-fills a question or instruction without sending it.
 - **Since you looked.** The page knows when you last opened it and shows what changed since then.
 - **Forecasts with a track record.** The bot predicts the next run (`brief.json.predictions`), the collector scores each call against what actually happened, and the page shows how many forecasts were right.
 - **Versions.** The bot archives the previous artifact before each rewrite, and the history menu restores any version (restores are versioned too).
@@ -51,6 +53,8 @@ Requires Hermes ≥ 0.21.5. Tested against renderer/backend v0.23.1.
 ## Tests
 
 - `tests/render-artifact.cjs <space-dir> <out>` renders an artifact standalone in light and dark at 390, 820, and 1180 px. It fails on JS errors and flags horizontal overflow.
+- `tests/sheets.cjs <space-dir> <out> [width]` opens every details panel, checks it isn't empty, exercises facts search, and walks Approve through confirm, running and done.
+- `tests/approve-ui.cjs <space-id>` runs the live Approve flow in the Webapp. Use a harmless test space. Last run: a details panel opened with 0 chat calls, and Approve ran the bot's fix and showed "Done" on the card in 42 s.
 - `tests/live-ui.cjs` runs end to end in the loopback Webapp: hub → space → click a failed square → the question appears in the Ask panel → the bot's answer streams in → a typed follow-up gets an answer in the same thread. Set `SIDE=<port>` with `tests/side_backend.py` to exercise backend changes before a gateway restart. Last run: both answers completed (11 s and 6 s) with no JS errors.
 
 ## Limits
